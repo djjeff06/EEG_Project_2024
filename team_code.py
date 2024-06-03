@@ -1,5 +1,5 @@
 # Author: Jefferson Dionisio
-# Date: 2024-06-03
+# Date: 2024-06-04
 
 #!/usr/bin/env python
 
@@ -143,7 +143,7 @@ def train_challenge_model(data_folder, model_folder, verbose):
     train_cpc_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs=200)
     
     # Save the models.
-    save_challenge_model(model_folder, scaler, outcome_model, cpc_model)
+    save_challenge_model(model_folder, scaler, outcome_model.state_dict(), cpc_model.state_dict())
 
     if verbose >= 1:
         print('Done.')
@@ -220,7 +220,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 # Save your trained model.
 def save_challenge_model(model_folder, imputer, outcome_model, cpc_model):
     d = {'imputer': imputer, 'outcome_model': outcome_model, 'cpc_model': cpc_model}
-    filename = os.path.join(model_folder, 'models.sav')
+    filename = os.path.join(model_folder, 'model.sav')
     joblib.dump(d, filename, protocol=0)
 
 # Preprocess data.
