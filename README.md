@@ -8,7 +8,7 @@ The original code is licensed under the BSD 2-Clause License. See LICENSE for de
 
 ### Modifications License
 
-Modifications and additional code introduced by iDSSP Lab are licensed under BSD 2-Clause License. See LICENSE_MY_CODE for details.
+Modifications and additional code introduced by iDSSP Lab are licensed under BSD 2-Clause License. See LICENSE_NEW for details.
 
 ----------------------------------------------------------------------------------------------
 
