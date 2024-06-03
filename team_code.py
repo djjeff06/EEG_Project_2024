@@ -218,8 +218,8 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 ################################################################################
 
 # Save your trained model.
-def save_challenge_model(model_folder, imputer, outcome_model, cpc_model):
-    d = {'imputer': imputer, 'outcome_model': outcome_model, 'cpc_model': cpc_model}
+def save_challenge_model(model_folder, scaler, outcome_model, cpc_model):
+    d = {'scaler': scaler, 'outcome_model': outcome_model, 'cpc_model': cpc_model}
     filename = os.path.join(model_folder, 'model.sav')
     joblib.dump(d, filename, protocol=0)
 
