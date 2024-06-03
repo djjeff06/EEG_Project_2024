@@ -24,6 +24,8 @@ import math
 import random
 from torch.optim.lr_scheduler import StepLR
 import re
+from sklearn.model_selection import KFold
+from sklearn.metrics import accuracy_score, precision_recall_curve, roc_curve, auc, make_scorer, roc_auc_score, average_precision_score, f1_score, mean_squared_error, mean_absolute_error
 
 ################################################################################
 #
@@ -33,6 +35,115 @@ import re
 
 # Train your model.
 def train_challenge_model(data_folder, model_folder, verbose):
+    # Find data files.
+    if verbose >= 1:
+        print('Finding the Challenge data...')
+        
+    mne.set_log_level('WARNING')
+    patient_ids = find_data_folders(data_folder)
+    num_patients = len(patient_ids)
+
+    if num_patients==0:
+        raise FileNotFoundError('No data was provided.')
+
+    # Create a folder for the model if it does not already exist.
+    os.makedirs(model_folder, exist_ok=True)
+
+    # Extract the features and labels.
+    if verbose >= 1:
+        print('Extracting features and labels from the Challenge data...')
+
+    outcomes = list()
+    cpcs = list()
+    hours_list = list()
+    recording_patient_dictionary = list()
+    eeg_features = list()
+    padding_masks = list()
+
+    for i in range(num_patients):
+        if verbose >= 2:
+            print('    {}/{}...'.format(i+1, num_patients))
+            
+        print("Processing patient#",i)
+        current_eeg_features, current_hours, current_masks = get_features(data_folder, patient_ids[i])
+
+        print(len(current_eeg_features), ' recordings found!')
+
+        for j in range(len(current_hours)):
+            hours_list.append(current_hours[j])
+            recording_patient_dictionary.append(i)
+            eeg_features.append(current_eeg_features[j])
+            padding_masks.append(current_masks[j])
+
+        # Extract labels.
+        patient_metadata = load_challenge_data(data_folder, patient_ids[i])
+        current_outcome = get_outcome(patient_metadata)
+        outcomes.append(current_outcome)
+        current_cpc = get_cpc(patient_metadata)
+        cpcs.append(current_cpc)
+
+    outcomes = np.array(outcomes)
+    cpcs = np.array(cpcs)
+    hours_list = np.array(hours_list)
+    recording_patient_dictionary = np.array(recording_patient_dictionary)
+    eeg_features = np.array(eeg_features)
+    padding_masks = np.array(padding_masks)
+
+    # Train the models.
+    if verbose >= 1:
+        print('Training the Challenge model on the Challenge data...')
+        
+    # Normalize data from 0 to 1 - training set
+    scaler = MinMaxScaler()
+    n_samples, n_epochs, n_features = eeg_features.shape
+    eeg_features = eeg_features.reshape((n_samples * n_epochs, n_features))
+    eeg_features = scaler.fit_transform(eeg_features)
+    eeg_features = eeg_features.reshape((n_samples, n_epochs, n_features))
+    
+    # Get train eeg outcomes from patient outcomes
+    recording_labels = []
+    for patient_index in recording_patient_dictionary:
+        recording_labels.append((outcomes[patient_index], cpcs[patient_index]))
+    recording_labels = np.array(recording_labels)
+    
+    # Process tensors
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    X_train_tensor = torch.tensor(eeg_features, dtype=torch.float32).to(device)
+    y_train_out_tensor = torch.tensor(recording_labels[:,0], dtype=torch.int64).to(device)
+    y_train_cpc_tensor = torch.tensor(recording_labels[:,1], dtype=torch.float32).to(device)
+    pindex_train_tensor = torch.tensor(recording_patient_dictionary, dtype=torch.int64).to(device)
+    mask_train_tensor = torch.tensor(padding_masks, dtype=torch.bool).to(device)
+    batch_size = 16
+    train_ds = TensorDataset(X_train_tensor, y_train_out_tensor, y_train_cpc_tensor, pindex_train_tensor, mask_train_tensor)
+    input_size = X_train_tensor.shape[2]
+    
+    # Set random seeds
+    random_seed = 15
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
+    torch.manual_seed(random_seed)
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    torch.cuda.manual_seed(random_seed)
+    torch.cuda.manual_seed_all(random_seed)
+    
+    train_dl = DataLoader(train_ds, batch_size, shuffle=True)
+
+    # Train the models.
+    model = Classifier(input_size=input_size, num_classes=2, n_embedding=64, num_heads=8, num_layers=3, dropout=0.4).to(device)
+    loss_fn = nn.BCELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    scheduler = StepLR(optimizer, step_size=50, gamma=0.99)
+    train_out_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs=200)
+    loss_fn = nn.L1Loss()
+    optimizer = torch.optim.RMSprop(model.parameters(), lr=0.0001)
+    scheduler = StepLR(optimizer, step_size=50, gamma=0.99)
+    train_cpc_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs=200)
+    
+    # Save the models.
+    save_challenge_model(model_folder, scaler, outcome_model, cpc_model)
+
     if verbose >= 1:
         print('Done.')
 
@@ -53,7 +164,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     cpc_model_state_dict = models['cpc_model']
     
     # Extract features.
-    eeg_features, masks = get_features(data_folder, patient_id)
+    eeg_features, hours, masks = get_features(data_folder, patient_id)
     eeg_features = np.array(eeg_features)
     masks = np.array(masks)
 
@@ -221,10 +332,12 @@ def get_features(data_folder, patient_id):
     else:
         all_eeg_features.append([[0] * 76 for _ in range(11)])
         masks_list.append([[False] for _ in range(11)])
+        hours_list.append(1)
         all_eeg_features = np.array(all_eeg_features)
         masks_list = np.squeeze(np.array(masks_list), axis=-1)
+        hours_list = np.array(hours_list)
     
-    return all_eeg_features, masks_list
+    return all_eeg_features, hours_list, masks_list
 
 # Extract patient features from the data.
 def get_patient_features(data):
@@ -325,6 +438,260 @@ def get_end_time_header(header):
             end_time_minutes = int(end_time.split(':')[1])
             break
     return end_time_minutes
+
+def compute_tpr_at_fpr(labels, outputs, target_fpr=0.05):
+    assert len(labels) == len(outputs)
+
+    # Combine labels and outputs into a 2D array
+    data = np.column_stack((labels, outputs))
+
+    # Sort the data based on output scores in descending order
+    sorted_data = data[data[:, 1].argsort()[::-1]]
+
+    num_positives = np.sum(labels == 1)
+    num_negatives = len(labels) - num_positives
+
+    # Initialize variables
+    tp = 0
+    fp = 0
+    tpr = 0.0
+
+    for i in range(len(sorted_data)):
+        if sorted_data[i, 0] == 1:
+            tp += 1
+        else:
+            fp += 1
+
+        current_fpr = fp / num_negatives
+        current_tpr = tp / num_positives
+
+        if current_fpr >= target_fpr:
+            tpr = current_tpr
+            break
+
+    return tpr
+
+def train_out_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs, num_folds=5, patience=10, best_auprc=0):
+    print("Training model for outcome prediction, with cross validation...")
+    
+    kf = KFold(n_splits=num_folds, shuffle=True, random_state=15)
+    current_patience = 0
+    
+    for epoch in range(epochs):
+        if current_patience < patience:
+            print(f"Epoch {epoch + 1}/{epochs}...")
+            y_pred_prob_list = list()
+            y_true_list = list()
+            patient_indices_list = list()
+
+            train_loss_epoch = 0.0
+            val_loss_epoch = 0.0
+            
+            for fold, (train_index, val_index) in enumerate(kf.split(train_dl.dataset)):
+                train_dataset = torch.utils.data.Subset(train_dl.dataset, train_index)
+                val_dataset = torch.utils.data.Subset(train_dl.dataset, val_index)
+
+                train_dl_fold = torch.utils.data.DataLoader(train_dataset, batch_size=train_dl.batch_size, shuffle=True)
+                val_dl_fold = torch.utils.data.DataLoader(val_dataset, batch_size=train_dl.batch_size)
+
+                model.train()
+       
+                train_loss = 0
+                for x, y, _, p_index, padding_mask in train_dl_fold:
+                    optimizer.zero_grad()
+                    outcomes = model.forward(x, padding_mask, device)
+                    loss = loss_fn(outcomes, y.unsqueeze(1).float())
+                    train_loss += loss.item()
+                    loss.backward()
+                    optimizer.step()
+                
+                train_loss_epoch = train_loss_epoch + (train_loss / len(train_dl_fold))
+                
+                # Evaluate on the validation set
+                val_loss, y_pred_prob, y_true, patient_indices = evaluate_out_val(model, val_dl_fold, loss_fn, device)
+                val_loss_epoch += val_loss
+                
+                y_pred_prob_list.extend(y_pred_prob)
+                y_true_list.extend(y_true)
+                patient_indices_list.extend(patient_indices)
+                
+            scheduler.step()
+            
+            # Print progress and metrics
+            print(f"Train Loss per epoch: {train_loss_epoch/num_folds:.4f} | Val Loss per epoch: {val_loss_epoch/num_folds:.4f}")
+
+            # do majority voting here
+            curr_index = 0
+            patient_pred_prob = list()
+            p_labels = list()
+            
+            while curr_index <= np.max(patient_indices_list):
+                curr_pred_probs = list()
+                curr_truths = list()
+                for i in range(len(patient_indices_list)):
+                    if patient_indices_list[i] == curr_index:
+                        curr_pred_probs.append(y_pred_prob_list[i])
+                        curr_truths.append(y_true_list[i])
+
+                # compute average
+                if len(curr_truths) > 0:
+                    patient_pred_prob.append(np.mean(curr_pred_probs))
+                    p_labels.append(curr_truths[0])
+                curr_index+=1
+            
+            patient_pred_prob = np.array(patient_pred_prob)
+            p_labels = np.array(p_labels)
+            
+            tpr_over_fpr = compute_tpr_at_fpr(p_labels, patient_pred_prob)
+            auroc = roc_auc_score(p_labels, patient_pred_prob)
+            auprc = average_precision_score(p_labels, patient_pred_prob)
+            
+            print("Patient-wise predictions over cross-validation: ")
+            print("True Positive Rate over False Positive Rate:", tpr_over_fpr)
+            print("AUROC:", auroc)
+            print("AUPRC:", auprc)
+
+            thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+            best_f1_score = 0
+            best_accuracy = 0
+            best_threshold = 0
+            for threshold in thresholds:
+                patient_pred = list()
+                for pred_prob in patient_pred_prob:
+                    if np.mean(pred_prob)>threshold:
+                        patient_pred.append(1)
+                    else:
+                        patient_pred.append(0)
+                        
+                patient_pred = np.array(patient_pred)
+                accuracy = accuracy_score(p_labels, patient_pred)
+                f1 = f1_score(p_labels, patient_pred)
+                if f1 > best_f1_score:
+                    best_f1_score = f1
+                    best_accuracy = accuracy
+                    best_threshold = threshold
+                
+            print('Optimized threshold: ', best_threshold)
+            print("Accuracy: ", best_accuracy)
+            print("F1 Score: ", best_f1_score)
+            
+            # Check for early stopping
+            if auprc > best_auprc:
+                best_auprc = auprc
+                current_patience = 0
+            else:
+                current_patience += 1
+                if current_patience >= patience:
+                    print(f"Early stopping at epoch {epoch+1}...")
+
+def train_cpc_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs, num_folds=5, patience=10):
+    print("Training model for outcome prediction, with cross validation...")
+    
+    best_val_loss = float('inf')
+    
+    kf = KFold(n_splits=num_folds, shuffle=True, random_state=15)
+    current_patience = 0
+    
+    for epoch in range(epochs):
+        if current_patience < patience:
+            print(f"Epoch {epoch + 1}/{epochs}...")
+
+            y_pred_list = list()
+            y_true_list = list()
+            patient_indices_list = list()
+
+            train_loss_epoch = 0.0
+            val_loss_epoch = 0.0
+            
+            for fold, (train_index, val_index) in enumerate(kf.split(train_dl.dataset)):
+                train_dataset = torch.utils.data.Subset(train_dl.dataset, train_index)
+                val_dataset = torch.utils.data.Subset(train_dl.dataset, val_index)
+
+                train_dl_fold = torch.utils.data.DataLoader(train_dataset, batch_size=train_dl.batch_size, shuffle=True)
+                val_dl_fold = torch.utils.data.DataLoader(val_dataset, batch_size=train_dl.batch_size)
+
+                model.train()
+       
+                train_loss = 0
+                for x, _, y, p_index, padding_mask in train_dl_fold:
+                    optimizer.zero_grad()
+                    outcomes = model.forward(x, padding_mask, device)
+                    loss = loss_fn(outcomes, y.unsqueeze(1).float())
+                    train_loss += loss.item()
+                    loss.backward()
+                    optimizer.step()
+                
+                train_loss_epoch = train_loss_epoch + (train_loss / len(train_dl_fold))
+                
+                # Evaluate on the validation set
+                val_loss, y_pred_prob, y_true, patient_indices = evaluate_cpc_val(model, val_dl_fold, loss_fn, device)
+                val_loss_epoch += val_loss
+                
+                y_pred_list.extend(y_pred_prob)
+                y_true_list.extend(y_true)
+                patient_indices_list.extend(patient_indices)
+                
+            scheduler.step()
+            
+            # Print progress and metrics
+            print(f"Train Loss per epoch: {train_loss_epoch/num_folds:.4f} | Val Loss per epoch: {val_loss_epoch/num_folds:.4f}")
+            
+            # Check for early stopping
+            if (val_loss_epoch/num_folds) < best_val_loss:
+                best_val_loss = val_loss_epoch/num_folds
+                current_patience = 0
+            else:
+                current_patience += 1
+                if current_patience >= patience:
+                    print(f"Early stopping at epoch {epoch+1}...")
+
+def evaluate_out_val(model, val_dl, loss_fn, device):
+    model.eval()
+    val_loss = 0.0
+    y_true = []
+    y_pred_probs = []
+    patient_indices = []
+
+    with torch.no_grad():
+        for x, y, _, p_index, key_padding_mask in val_dl:
+            outcomes = model.forward(x, key_padding_mask, device)
+            loss = loss_fn(outcomes, y.unsqueeze(1).float())
+            val_loss += loss.item()
+            y_pred_probs.extend(outcomes.cpu().numpy())
+            y_true.extend(y.cpu().numpy())
+            patient_indices.extend(p_index.cpu())
+
+    y_pred_probs = np.array(y_pred_probs)
+    y_true = np.array(y_true)
+
+    val_loss /= len(val_dl)
+    patient_indices = np.array(patient_indices)
+
+    return val_loss, y_pred_probs, y_true, patient_indices
+
+def evaluate_cpc_val(model, val_dl, loss_fn, device):
+    model.eval()
+    val_loss = 0.0
+    y_true = []
+    y_preds = []
+    patient_indices = []
+
+    with torch.no_grad():
+        for x, _, y, p_index, key_padding_mask in val_dl:
+            outcomes = model.forward(x, key_padding_mask, device)
+            loss = loss_fn(outcomes, y.unsqueeze(1).float())
+            val_loss += loss.item()
+            y_preds.extend(outcomes.cpu().numpy())
+            y_true.extend(y.cpu().numpy())
+            patient_indices.extend(p_index.cpu())
+
+    y_preds = np.array(y_preds)
+    y_true = np.array(y_true)
+
+    val_loss /= len(val_dl)
+    patient_indices = np.array(patient_indices)
+
+    return val_loss, y_preds, y_true, patient_indices
 
 def evaluate_out_test(model, test_dl, device, pred_threshold=0.5):
     model.eval()
