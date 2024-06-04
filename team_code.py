@@ -1,5 +1,4 @@
 # Author: Jefferson Dionisio
-# Date: 2024-06-04
 
 #!/usr/bin/env python
 
@@ -132,18 +131,19 @@ def train_challenge_model(data_folder, model_folder, verbose):
     train_dl = DataLoader(train_ds, batch_size, shuffle=True)
 
     # Train the models.
-    model = Classifier(input_size=input_size, num_classes=2, n_embedding=64, num_heads=8, num_layers=3, dropout=0.4).to(device)
+    outcome_model = Classifier(input_size=input_size, num_classes=2, n_embedding=64, num_heads=8, num_layers=3, dropout=0.4).to(device)
     loss_fn = nn.BCELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = torch.optim.Adam(outcome_model.parameters(), lr=0.0001)
     scheduler = StepLR(optimizer, step_size=50, gamma=0.99)
-    train_out_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs=200)
+    optimized_threshold = train_out_model(outcome_model, train_dl, loss_fn, optimizer, scheduler, device, epochs=200)
+    cpc_model = CPC_Classifier(input_size=input_size, num_classes=2, n_embedding=64, num_heads=8, num_layers=3, dropout=0.4).to(device)
     loss_fn = nn.L1Loss()
-    optimizer = torch.optim.RMSprop(model.parameters(), lr=0.0001)
+    optimizer = torch.optim.RMSprop(cpc_model.parameters(), lr=0.0001)
     scheduler = StepLR(optimizer, step_size=50, gamma=0.99)
-    train_cpc_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs=200)
+    train_cpc_model(cpc_model, train_dl, loss_fn, optimizer, scheduler, device, epochs=200)
     
     # Save the models.
-    save_challenge_model(model_folder, scaler, outcome_model.state_dict(), cpc_model.state_dict())
+    save_challenge_model(model_folder, scaler, optimized_threshold, outcome_model.state_dict(), cpc_model.state_dict())
 
     if verbose >= 1:
         print('Done.')
@@ -161,6 +161,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 
     print('Processing patient ', patient_id)
     scaler = models['scaler']
+    optimized_threshold = models['optimized_threshold']
     outcome_model_state_dict = models['outcome_model']
     cpc_model_state_dict = models['cpc_model']
     
@@ -202,8 +203,7 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
     cpc_model.load_state_dict(cpc_model_state_dict)
 
     # Evaluate with models
-    pred_threshold = 0.62
-    outcome, outcome_probability = evaluate_out_test(outcome_model, test_dl, device, pred_threshold)
+    outcome, outcome_probability = evaluate_out_test(outcome_model, test_dl, device, optimized_threshold)
     cpc = evaluate_cpc_test(cpc_model, test_dl, device)
 
     # Ensure that the CPC score is between (or equal to) 1 and 5.
@@ -218,9 +218,9 @@ def run_challenge_models(models, data_folder, patient_id, verbose):
 ################################################################################
 
 # Save your trained model.
-def save_challenge_model(model_folder, scaler, outcome_model, cpc_model):
-    d = {'scaler': scaler, 'outcome_model': outcome_model, 'cpc_model': cpc_model}
-    filename = os.path.join(model_folder, 'model.sav')
+def save_challenge_model(model_folder, scaler, optimized_threshold, outcome_model, cpc_model):
+    d = {'scaler': scaler, 'optimized_threshold': optimized_threshold, 'outcome_model': outcome_model, 'cpc_model': cpc_model}
+    filename = os.path.join(model_folder, 'models.sav')
     joblib.dump(d, filename, protocol=0)
 
 # Preprocess data.
@@ -584,6 +584,8 @@ def train_out_model(model, train_dl, loss_fn, optimizer, scheduler, device, epoc
                 current_patience += 1
                 if current_patience >= patience:
                     print(f"Early stopping at epoch {epoch+1}...")
+                    
+    return best_threshold
 
 def train_cpc_model(model, train_dl, loss_fn, optimizer, scheduler, device, epochs, num_folds=5, patience=10):
     print("Training model for outcome prediction, with cross validation...")
