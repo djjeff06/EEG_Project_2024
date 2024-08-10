@@ -328,15 +328,14 @@ def get_features(data_folder, patient_id):
                                     all_eeg_features[-1][starting_index] = get_eeg_features(epoch, 128).flatten()
                                     masks_list[-1][starting_index] = False
                                     starting_index += 1
-
-                                    
-    else:
+        
+    if not all_eeg_features:
         all_eeg_features.append([[0] * 76 for _ in range(11)])
         masks_list.append([[False] for _ in range(11)])
         hours_list.append(1)
         all_eeg_features = np.array(all_eeg_features)
         masks_list = np.squeeze(np.array(masks_list), axis=-1)
-        hours_list = np.array(hours_list)
+        hours_list = np.array(hours_list)    
     
     return all_eeg_features, hours_list, masks_list
 
